@@ -1,0 +1,36 @@
+[project]
+name = "cryptarch"
+version = "0.1.0"
+description = "Three-layer crypto trading: funding-rate arb + liquidation cascade capture + tail hedge"
+requires-python = ">=3.11"
+dependencies = [
+    "ccxt>=4.2",                # 100+ exchange unified API
+    "asyncpg>=0.29",
+    "pydantic>=2.5",
+    "pydantic-settings>=2.1",
+    "structlog>=24.1",
+    "click>=8.1",
+    "tenacity>=8.2",
+    "websockets>=12",
+    "aiohttp>=3.9",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=4.1",
+    "ruff>=0.1",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

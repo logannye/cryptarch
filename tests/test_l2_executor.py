@@ -1,0 +1,361 @@
+"""L2Executor orchestration tests. Mocks store + exchange to verify the
+ladder placement, fill detection, and TP/SL state machine without real
+network or DB access."""
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+from cryptarch.core.config import Settings
+from cryptarch.db.store import OpenPosition
+from cryptarch.exchanges.base import Ticker
+from cryptarch.sim.realistic import OrderBookLevel, OrderBookSnapshot
+from cryptarch.strategies.l2_executor import L2Executor, SymbolConfig
+
+
+def _settings(**overrides) -> Settings:
+    base = dict(
+        bankroll_usd=2000.0,
+        alloc_layer_1_pct=0.60,
+        alloc_layer_2_pct=0.25,
+        alloc_layer_3_pct=0.15,
+        max_total_deployed_pct=0.50,
+        max_per_position_usd=500.0,
+        enable_live_orders=False,
+        layer_2_cascade_capture_enabled=True,
+        l2_ladder_levels=4,
+        l2_ladder_total_usd=200.0,
+        l2_take_profit_pct=0.012,
+        l2_stop_loss_pct=0.030,
+    )
+    base.update(overrides)
+    return Settings(_env_file=None, **base)
+
+
+def _book(asks: list[tuple[float, float]], bids: list[tuple[float, float]]) -> OrderBookSnapshot:
+    return OrderBookSnapshot(
+        asks=tuple(OrderBookLevel(p, s) for p, s in asks),
+        bids=tuple(OrderBookLevel(p, s) for p, s in bids),
+    )
+
+
+def _make_pool(spot_price: float, book: OrderBookSnapshot | None = None):
+    book = book or _book(
+        asks=[(spot_price * 1.0001, 1000)],
+        bids=[(spot_price * 0.9999, 1000)],
+    )
+    client = MagicMock()
+    client.get_ticker = AsyncMock(return_value=Ticker(
+        exchange="binance", symbol="BTC/USDT",
+        bid=spot_price - 1, ask=spot_price + 1, last=spot_price,
+        fetched_at=datetime.now(timezone.utc),
+    ))
+    client.get_order_book = AsyncMock(return_value=book)
+    pool = MagicMock()
+    async def _get(exchange_id, market_type="spot"):
+        return client
+    pool.get = _get
+    return pool, client
+
+
+def _make_store(open_positions=None, total_at_risk=0.0, layer_deployed=0.0,
+                state_halt_reason=None):
+    store = MagicMock()
+    state = MagicMock()
+    state.halt_reason = state_halt_reason
+    state.dynamic_alloc_l1_pct = None
+    state.dynamic_alloc_l2_pct = None
+    state.dynamic_alloc_l3_pct = None
+    store.get_system_state = AsyncMock(return_value=state)
+    store.open_positions = AsyncMock(return_value=open_positions or [])
+    store.total_at_risk_usd = AsyncMock(return_value=total_at_risk)
+    store.layer_deployed_usd = AsyncMock(return_value=layer_deployed)
+    store.recent_client_order_ids = AsyncMock(return_value=set())
+    store.create_position = AsyncMock(side_effect=lambda **kw: 100 + kw.get("notional_usd", 0))
+    store.mark_position_open = AsyncMock()
+    store.close_position = AsyncMock()
+    store.record_fill = AsyncMock(return_value=1)
+    store._pool = MagicMock()
+    store._pool.execute = AsyncMock()
+    return store
+
+
+# ── trigger logic ──
+
+
+@pytest.mark.asyncio
+async def test_high_signal_places_ladder():
+    settings = _settings()
+    pool, _ = _make_pool(spot_price=50000)
+    store = _make_store()
+    sym = SymbolConfig("binance", "BTC/USDT", "BTC")
+    executor = L2Executor(
+        settings, store, pool, symbols=[sym],
+        signal_fn=lambda s, e: _const(0.85),    # strong signal
+    )
+    result = await executor.run_once()
+    assert result["new_ladders"] == 1
+    # 4 rungs created
+    assert store.create_position.await_count == 4
+
+
+@pytest.mark.asyncio
+async def test_low_signal_does_nothing():
+    settings = _settings()
+    pool, _ = _make_pool(spot_price=50000)
+    store = _make_store()
+    sym = SymbolConfig("binance", "BTC/USDT", "BTC")
+    executor = L2Executor(
+        settings, store, pool, symbols=[sym],
+        signal_fn=lambda s, e: _const(0.30),    # below threshold
+    )
+    result = await executor.run_once()
+    assert result["new_ladders"] == 0
+    store.create_position.assert_not_called()
+
+
+# ── existing-ladder dedup ──
+
+
+@pytest.mark.asyncio
+async def test_does_not_place_second_ladder_for_same_symbol():
+    settings = _settings()
+    pool, _ = _make_pool(spot_price=50000)
+    existing = OpenPosition(
+        id=1, layer="l2_cascade", strategy_group_id="g1",
+        state="opening", notional_usd=50.0, realized_pnl_usd=0,
+        opened_at=datetime.now(timezone.utc),
+        metadata={"symbol_key": "binance:BTC/USDT", "limit_price": 49500,
+                  "size_usd": 50, "rung_idx": 0,
+                  "spot_at_design": 50000},
+    )
+    store = _make_store(open_positions=[existing])
+    sym = SymbolConfig("binance", "BTC/USDT", "BTC")
+    executor = L2Executor(
+        settings, store, pool, symbols=[sym],
+        signal_fn=lambda s, e: _const(0.85),
+    )
+    result = await executor.run_once()
+    assert result["new_ladders"] == 0
+
+
+# ── pending rung fill ──
+
+
+@pytest.mark.asyncio
+async def test_pending_rung_fills_when_book_crosses():
+    settings = _settings()
+    # Book has best_ask at $49,500 — equals our rung's limit
+    book = _book(asks=[(49500, 1000)], bids=[(49490, 1000)])
+    pool, _ = _make_pool(spot_price=49500, book=book)
+
+    pending = OpenPosition(
+        id=1, layer="l2_cascade", strategy_group_id="g1",
+        state="opening", notional_usd=50.0, realized_pnl_usd=0,
+        opened_at=datetime.now(timezone.utc),
+        metadata={
+            "symbol_key": "binance:BTC/USDT",
+            "exchange": "binance", "symbol": "BTC/USDT",
+            "limit_price": 49500, "size_usd": 50,
+            "rung_idx": 0, "spot_at_design": 50000,
+        },
+    )
+    store = _make_store(open_positions=[pending])
+    sym = SymbolConfig("binance", "BTC/USDT", "BTC")
+    executor = L2Executor(
+        settings, store, pool, symbols=[sym],
+        signal_fn=lambda s, e: _const(0.85),
+    )
+    result = await executor.run_once()
+    assert result["rungs_filled"] == 1
+    store.mark_position_open.assert_awaited_once_with(1)
+
+
+@pytest.mark.asyncio
+async def test_pending_rung_holds_when_book_above():
+    settings = _settings()
+    # Best ask far above our limit — won't fill
+    book = _book(asks=[(50000, 1000)], bids=[(49500, 1000)])
+    pool, _ = _make_pool(spot_price=50000, book=book)
+
+    pending = OpenPosition(
+        id=1, layer="l2_cascade", strategy_group_id="g1",
+        state="opening", notional_usd=50.0, realized_pnl_usd=0,
+        opened_at=datetime.now(timezone.utc),
+        metadata={
+            "symbol_key": "binance:BTC/USDT",
+            "exchange": "binance", "symbol": "BTC/USDT",
+            "limit_price": 49000, "size_usd": 50,    # 1k below ask
+            "rung_idx": 1, "spot_at_design": 50000,
+        },
+    )
+    store = _make_store(open_positions=[pending])
+    sym = SymbolConfig("binance", "BTC/USDT", "BTC")
+    executor = L2Executor(
+        settings, store, pool, symbols=[sym],
+        signal_fn=lambda s, e: _const(0.85),
+    )
+    result = await executor.run_once()
+    assert result["rungs_filled"] == 0
+    store.mark_position_open.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_pending_rung_cancels_when_signal_weakens():
+    settings = _settings()
+    book = _book(asks=[(50000, 1000)], bids=[(49500, 1000)])
+    pool, _ = _make_pool(spot_price=50000, book=book)
+
+    pending = OpenPosition(
+        id=1, layer="l2_cascade", strategy_group_id="g1",
+        state="opening", notional_usd=50.0, realized_pnl_usd=0,
+        opened_at=datetime.now(timezone.utc),
+        metadata={
+            "symbol_key": "binance:BTC/USDT",
+            "exchange": "binance", "symbol": "BTC/USDT",
+            "limit_price": 49000, "size_usd": 50, "rung_idx": 1,
+            "spot_at_design": 50000,
+        },
+    )
+    store = _make_store(open_positions=[pending])
+    sym = SymbolConfig("binance", "BTC/USDT", "BTC")
+    executor = L2Executor(
+        settings, store, pool, symbols=[sym],
+        signal_fn=lambda s, e: _const(0.20),    # signal weakened
+    )
+    result = await executor.run_once()
+    assert result["positions_closed"] == 1
+    store.close_position.assert_awaited_once_with(1, realized_pnl=0.0)
+
+
+# ── filled position TP/SL/time-stop ──
+
+
+@pytest.mark.asyncio
+async def test_filled_position_takes_profit():
+    settings = _settings()
+    # Fill price was 50000; TP = 50000 × 1.012 = 50600; bid > 50600
+    book = _book(asks=[(50700, 1000)], bids=[(50650, 1000)])
+    pool, _ = _make_pool(spot_price=50650, book=book)
+
+    filled = OpenPosition(
+        id=1, layer="l2_cascade", strategy_group_id="g1",
+        state="open", notional_usd=50.0, realized_pnl_usd=0,
+        opened_at=datetime.now(timezone.utc),
+        metadata={
+            "symbol_key": "binance:BTC/USDT",
+            "exchange": "binance", "symbol": "BTC/USDT",
+            "limit_price": 50000, "size_usd": 50, "rung_idx": 0,
+            "spot_at_design": 50000,
+            "fill_price": 50000, "tp_price": 50600, "sl_price": 48500,
+            "filled_at": datetime.now(timezone.utc).isoformat(),
+        },
+    )
+    store = _make_store(open_positions=[filled])
+    sym = SymbolConfig("binance", "BTC/USDT", "BTC")
+    executor = L2Executor(settings, store, pool, symbols=[sym],
+                         signal_fn=lambda s, e: _const(0.5))
+    result = await executor.run_once()
+    assert result["positions_closed"] == 1
+    # close_position called with positive PnL
+    args = store.close_position.await_args
+    assert args.kwargs["realized_pnl"] > 0
+
+
+@pytest.mark.asyncio
+async def test_filled_position_stops_loss():
+    settings = _settings()
+    # Bid at 48400 < SL of 48500 → stop-loss fires
+    book = _book(asks=[(48450, 1000)], bids=[(48400, 1000)])
+    pool, _ = _make_pool(spot_price=48400, book=book)
+
+    filled = OpenPosition(
+        id=1, layer="l2_cascade", strategy_group_id="g1",
+        state="open", notional_usd=50.0, realized_pnl_usd=0,
+        opened_at=datetime.now(timezone.utc),
+        metadata={
+            "symbol_key": "binance:BTC/USDT",
+            "exchange": "binance", "symbol": "BTC/USDT",
+            "limit_price": 50000, "size_usd": 50, "rung_idx": 0,
+            "spot_at_design": 50000,
+            "fill_price": 50000, "tp_price": 50600, "sl_price": 48500,
+            "filled_at": datetime.now(timezone.utc).isoformat(),
+        },
+    )
+    store = _make_store(open_positions=[filled])
+    sym = SymbolConfig("binance", "BTC/USDT", "BTC")
+    executor = L2Executor(settings, store, pool, symbols=[sym],
+                         signal_fn=lambda s, e: _const(0.5))
+    result = await executor.run_once()
+    assert result["positions_closed"] == 1
+    args = store.close_position.await_args
+    assert args.kwargs["realized_pnl"] < 0
+
+
+@pytest.mark.asyncio
+async def test_filled_position_time_stops():
+    settings = _settings()
+    # Bid hovering near fill → no TP/SL trigger; but age > 60min → time-stop
+    book = _book(asks=[(50050, 1000)], bids=[(50000, 1000)])
+    pool, _ = _make_pool(spot_price=50000, book=book)
+
+    filled = OpenPosition(
+        id=1, layer="l2_cascade", strategy_group_id="g1",
+        state="open", notional_usd=50.0, realized_pnl_usd=0,
+        opened_at=datetime.now(timezone.utc) - timedelta(minutes=90),
+        metadata={
+            "symbol_key": "binance:BTC/USDT",
+            "exchange": "binance", "symbol": "BTC/USDT",
+            "limit_price": 50000, "size_usd": 50, "rung_idx": 0,
+            "spot_at_design": 50000,
+            "fill_price": 50000, "tp_price": 50600, "sl_price": 48500,
+            "filled_at": (datetime.now(timezone.utc) - timedelta(minutes=90)).isoformat(),
+        },
+    )
+    store = _make_store(open_positions=[filled])
+    sym = SymbolConfig("binance", "BTC/USDT", "BTC")
+    executor = L2Executor(settings, store, pool, symbols=[sym],
+                         signal_fn=lambda s, e: _const(0.5))
+    result = await executor.run_once()
+    assert result["positions_closed"] == 1
+
+
+# ── disabled / halted ──
+
+
+@pytest.mark.asyncio
+async def test_disabled_layer_skips():
+    settings = _settings(layer_2_cascade_capture_enabled=False)
+    pool = MagicMock()
+    store = _make_store()
+    executor = L2Executor(settings, store, pool, symbols=[])
+    result = await executor.run_once()
+    assert result == {"skipped": "layer_disabled"}
+
+
+@pytest.mark.asyncio
+async def test_halted_state_skips():
+    settings = _settings()
+    pool = MagicMock()
+    store = _make_store(state_halt_reason="manual halt")
+    executor = L2Executor(settings, store, pool, symbols=[])
+    result = await executor.run_once()
+    assert result["skipped"] == "halted"
+
+
+# ── helpers ──
+
+
+async def _const(v: float) -> float:
+    return v
+
+
+# Adapter so `signal_fn=lambda s, e: _const(0.85)` works (the lambda
+# captures the awaitable).
+class _ConstSignal:
+    def __init__(self, value: float):
+        self.value = value
+    async def __call__(self, sym, exec):
+        return self.value
