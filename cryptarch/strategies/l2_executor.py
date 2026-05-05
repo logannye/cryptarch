@@ -58,23 +58,32 @@ log = structlog.get_logger()
 # - Cleaner simulation
 # - Clean separation from L1 (which uses spot+perp combined)
 #
-# Concentrated universe: BTC/ETH/SOL as low-cost majors plus PEPE/WIF as
-# the high-vol memes that actually mean-revert on hour-scale dips. A
-# 90-day backtest showed XRP/DOGE/SHIB/FLOKI/BONK were neutral-to-
-# negative on cascade-capture P&L (FLOKI alone lost ~$9 of a +$80 gross),
-# while PEPE+WIF alone produced ~$84 — i.e. the universe was diluting
-# the actual edge. The other memes can return to the list once their
-# distribution-phase trends end.
+# Universe expanded after a 1m-granularity backtest revealed that the
+# original 5m backtest was systematically biased against fast V-shape
+# revert dynamics (the SL-first-when-both-bounds-in-bar artifact and
+# the same-bar-as-fill exit blind spot). Re-running the original 10-
+# symbol universe at 1m flipped DOGE from -$6 to +$21, validated SHIB
+# at +$13, and confirmed XRP/BONK/FLOKI as correctly pruned. A separate
+# candidate run added JASMY, TURBO, and PENGU as positive contributors.
+# BTC/ETH/SOL stayed in (institutional-flow majors near $0 P&L at 1m;
+# kept as cheap optionality for major-cap cascade events).
 #
 # Tuple form: (exchange, spot_symbol, base_label[, perp_symbol_override]).
 # The perp override is required for memecoins where Binance lists the
 # perp under a 1000-multiple base — PEPE/USDT spot ↔ 1000PEPE/USDT:USDT.
 DEFAULT_SYMBOLS: list[tuple[str, str, str] | tuple[str, str, str, str]] = [
-    ("binance", "BTC/USDT",  "BTC"),
-    ("binance", "ETH/USDT",  "ETH"),
-    ("binance", "SOL/USDT",  "SOL"),
-    ("binance", "PEPE/USDT", "PEPE", "1000PEPE/USDT:USDT"),
-    ("binance", "WIF/USDT",  "WIF"),
+    # Major-cap optionality
+    ("binance", "BTC/USDT",   "BTC"),
+    ("binance", "ETH/USDT",   "ETH"),
+    ("binance", "SOL/USDT",   "SOL"),
+    # High-vol memes / retail-driven (the actual edge)
+    ("binance", "PEPE/USDT",  "PEPE",  "1000PEPE/USDT:USDT"),
+    ("binance", "WIF/USDT",   "WIF"),
+    ("binance", "DOGE/USDT",  "DOGE"),
+    ("binance", "SHIB/USDT",  "SHIB",  "1000SHIB/USDT:USDT"),
+    ("binance", "JASMY/USDT", "JASMY"),
+    ("binance", "TURBO/USDT", "TURBO"),
+    ("binance", "PENGU/USDT", "PENGU"),
 ]
 
 

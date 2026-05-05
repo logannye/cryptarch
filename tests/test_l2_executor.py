@@ -22,18 +22,31 @@ class TestL2UniverseConcentration:
     DOGE, SHIB, FLOKI, BONK were dropped because they showed neutral-to-
     negative cascade-capture P&L over the same window."""
 
-    def test_universe_is_concentrated_to_five_symbols(self):
+    def test_universe_includes_majors_and_high_vol_memes(self):
+        """Post 1m-backtest universe: 3 majors + 7 high-vol/meme names.
+        DOGE and SHIB were re-added after the 1m rerun showed they were
+        wrongly pruned at 5m. JASMY/TURBO/PENGU added from the candidate
+        backtest. XRP/BONK/FLOKI confirmed correctly pruned (negative
+        at both granularities). POPCAT skipped — perp-only on Binance."""
         from cryptarch.strategies.l2_executor import DEFAULT_SYMBOLS
         bases = {row[2] for row in DEFAULT_SYMBOLS}
-        assert bases == {"BTC", "ETH", "SOL", "PEPE", "WIF"}
+        assert bases == {
+            "BTC", "ETH", "SOL",
+            "PEPE", "WIF", "DOGE", "SHIB", "JASMY", "TURBO", "PENGU",
+        }
 
-    def test_memecoins_carry_perp_symbol_override(self):
+    def test_1000_prefix_perps_carry_override(self):
+        """Binance lists PEPE and SHIB perps under a 1000-multiple base
+        (1000PEPE/USDT:USDT, 1000SHIB/USDT:USDT). The other new entries
+        (DOGE, JASMY, TURBO, PENGU) trade their perps under the same
+        base as spot — confirmed live before this change."""
         from cryptarch.strategies.l2_executor import DEFAULT_SYMBOLS
         by_base = {row[2]: row for row in DEFAULT_SYMBOLS}
-        # PEPE perp on Binance is listed as 1000PEPE — must override.
         assert by_base["PEPE"][3] == "1000PEPE/USDT:USDT"
-        # WIF doesn't need an override (its spot and perp share the base).
-        assert len(by_base["WIF"]) == 3
+        assert by_base["SHIB"][3] == "1000SHIB/USDT:USDT"
+        # No 1000-prefix needed for these (verified live):
+        for base in ("DOGE", "JASMY", "TURBO", "PENGU", "WIF"):
+            assert len(by_base[base]) == 3, f"{base} should not carry a perp_symbol_override"
 
 
 class TestSizingScalesWithBankroll:
