@@ -260,7 +260,7 @@ class L1Executor:
             - await self._store.layer_deployed_usd(self.LAYER)
         )
         budget = min(layer_remaining, self._settings.max_per_position_usd)
-        if budget < 20.0:    # not worth opening tiny positions; fees eat them
+        if budget < self._settings.min_position_usd:    # bankroll-relative floor; fees eat tiny positions
             return False
 
         plan = plan_position(cand, total_capital_usd=budget)

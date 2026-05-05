@@ -15,6 +15,79 @@ from cryptarch.sim.realistic import OrderBookLevel, OrderBookSnapshot
 from cryptarch.strategies.l2_executor import L2Executor, SymbolConfig
 
 
+class TestL2UniverseConcentration:
+    """The L2 universe is concentrated on the symbols where 90-day backtest
+    showed positive expected value: BTC/ETH/SOL as low-cost majors and
+    PEPE/WIF as the high-vol memecoins that actually mean-revert. XRP,
+    DOGE, SHIB, FLOKI, BONK were dropped because they showed neutral-to-
+    negative cascade-capture P&L over the same window."""
+
+    def test_universe_is_concentrated_to_five_symbols(self):
+        from cryptarch.strategies.l2_executor import DEFAULT_SYMBOLS
+        bases = {row[2] for row in DEFAULT_SYMBOLS}
+        assert bases == {"BTC", "ETH", "SOL", "PEPE", "WIF"}
+
+    def test_memecoins_carry_perp_symbol_override(self):
+        from cryptarch.strategies.l2_executor import DEFAULT_SYMBOLS
+        by_base = {row[2]: row for row in DEFAULT_SYMBOLS}
+        # PEPE perp on Binance is listed as 1000PEPE — must override.
+        assert by_base["PEPE"][3] == "1000PEPE/USDT:USDT"
+        # WIF doesn't need an override (its spot and perp share the base).
+        assert len(by_base["WIF"]) == 3
+
+
+class TestSizingScalesWithBankroll:
+    """Every dollar amount in the system is derived from bankroll × pct.
+    A $50k bankroll moves 10× the notional of a $5k one, with zero code
+    changes. Hardcoded $ values are an anti-pattern."""
+
+    def test_l2_ladder_default_pct_is_20pct(self):
+        from cryptarch.core.config import Settings
+        assert Settings(_env_file=None).l2_ladder_pct == 0.20
+
+    def test_l2_ladder_total_scales_with_bankroll(self):
+        from cryptarch.core.config import Settings
+        assert Settings(_env_file=None, bankroll_usd=2_000.0).l2_ladder_total_usd == 400.0
+        assert Settings(_env_file=None, bankroll_usd=5_000.0).l2_ladder_total_usd == 1_000.0
+        assert Settings(_env_file=None, bankroll_usd=50_000.0).l2_ladder_total_usd == 10_000.0
+
+    def test_max_per_position_scales_with_bankroll(self):
+        from cryptarch.core.config import Settings
+        assert Settings(_env_file=None, bankroll_usd=2_000.0).max_per_position_usd == 500.0
+        assert Settings(_env_file=None, bankroll_usd=50_000.0).max_per_position_usd == 12_500.0
+
+    def test_l3_theta_budget_scales_with_bankroll(self):
+        from cryptarch.core.config import Settings
+        assert Settings(_env_file=None, bankroll_usd=2_000.0).l3_daily_theta_budget_usd == 10.0
+        assert Settings(_env_file=None, bankroll_usd=50_000.0).l3_daily_theta_budget_usd == 250.0
+
+    def test_min_position_scales_with_bankroll(self):
+        """The minimum-trade-size floor (was hardcoded $20 in executors) is
+        also bankroll-relative — at $50k bankroll, $20 fills are noise."""
+        from cryptarch.core.config import Settings
+        assert Settings(_env_file=None, bankroll_usd=2_000.0).min_position_usd == 20.0
+        assert Settings(_env_file=None, bankroll_usd=50_000.0).min_position_usd == 500.0
+
+
+class TestSymbolConfigPerpSymbol:
+    """The L2 stack converts a spot symbol to its corresponding perp for
+    OI and funding-rate fetches. For most pairs this is just appending
+    `:USDT`, but Binance lists 1000-multiple memecoin perps under a
+    different base (e.g. PEPE/USDT spot ↔ 1000PEPE/USDT:USDT perp),
+    which the naive `.replace()` mapping silently breaks."""
+
+    def test_default_appends_usdt_suffix(self):
+        sym = SymbolConfig("binance", "BTC/USDT", "BTC")
+        assert sym.perp_symbol == "BTC/USDT:USDT"
+
+    def test_memecoin_override_uses_explicit_perp_symbol(self):
+        sym = SymbolConfig(
+            "binance", "PEPE/USDT", "PEPE",
+            perp_symbol_override="1000PEPE/USDT:USDT",
+        )
+        assert sym.perp_symbol == "1000PEPE/USDT:USDT"
+
+
 def _settings(**overrides) -> Settings:
     base = dict(
         bankroll_usd=2000.0,
@@ -22,11 +95,11 @@ def _settings(**overrides) -> Settings:
         alloc_layer_2_pct=0.25,
         alloc_layer_3_pct=0.15,
         max_total_deployed_pct=0.50,
-        max_per_position_usd=500.0,
+        max_per_position_pct=0.25,
         enable_live_orders=False,
         layer_2_cascade_capture_enabled=True,
         l2_ladder_levels=4,
-        l2_ladder_total_usd=200.0,
+        l2_ladder_pct=0.10,    # 10% of $2k = $200 for the legacy test scenario
         l2_take_profit_pct=0.012,
         l2_stop_loss_pct=0.030,
     )

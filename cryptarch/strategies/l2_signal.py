@@ -49,7 +49,7 @@ class CascadeSignal:
             return 0.0
         # Get current OI
         try:
-            perp_symbol = symbol.symbol.replace("/USDT", "/USDT:USDT")
+            perp_symbol = symbol.perp_symbol
             client = await self._pool.get(symbol.exchange, market_type="swap")
             oi = await client.get_open_interest(perp_symbol)
             current_oi = oi.oi_usd
@@ -127,7 +127,7 @@ class OIObserver:
         n_recorded = 0
         for symbol in self._symbols:
             try:
-                perp_symbol = symbol.symbol.replace("/USDT", "/USDT:USDT")
+                perp_symbol = symbol.perp_symbol
                 client = await self._pool.get(symbol.exchange, market_type="swap")
                 oi = await client.get_open_interest(perp_symbol)
                 if oi.oi_usd > 0:

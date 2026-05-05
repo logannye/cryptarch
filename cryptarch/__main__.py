@@ -187,7 +187,10 @@ async def _run() -> None:
             l1 = L1Executor(settings, store, pool)
             engine.register("l1_funding", l1.run_once)
         if settings.layer_2_cascade_capture_enabled:
-            symbols = [SymbolConfig(*s) for s in DEFAULT_SYMBOLS]
+            symbols = [
+                SymbolConfig(*s) if len(s) == 4 else SymbolConfig(*s, None)
+                for s in DEFAULT_SYMBOLS
+            ]
             l2_symbols_for_alloc = symbols
             # OI observer runs alongside L2 to bootstrap the rolling history
             # that the signal needs. Register it whether or not L2 is firing

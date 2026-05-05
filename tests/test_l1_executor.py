@@ -21,7 +21,7 @@ def _settings(**overrides) -> Settings:
         alloc_layer_2_pct=0.25,
         alloc_layer_3_pct=0.15,
         max_total_deployed_pct=0.50,
-        max_per_position_usd=500.0,
+        max_per_position_pct=0.25,
         enable_live_orders=False,
         layer_1_funding_arb_enabled=True,
         l1_min_funding_rate_8h=0.0003,

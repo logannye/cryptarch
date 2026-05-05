@@ -22,10 +22,10 @@ def _settings(**overrides) -> Settings:
         alloc_layer_2_pct=0.25,
         alloc_layer_3_pct=0.15,
         max_total_deployed_pct=0.50,
-        max_per_position_usd=500.0,
+        max_per_position_pct=0.25,
         enable_live_orders=False,
         layer_3_tail_hedge_enabled=True,
-        l3_daily_theta_budget_usd=10.0,
+        l3_daily_theta_budget_pct=0.005,
         l3_target_days_to_expiry=45,
         l3_otm_pct=0.20,
     )

@@ -18,7 +18,7 @@ def _settings(**kw) -> Settings:
     base = dict(
         bankroll_usd=2000.0,
         alloc_layer_1_pct=0.60, alloc_layer_2_pct=0.25, alloc_layer_3_pct=0.15,
-        max_total_deployed_pct=0.50, max_per_position_usd=500.0,
+        max_total_deployed_pct=0.50, max_per_position_pct=0.25,
         enable_live_orders=False,
     )
     base.update(kw)

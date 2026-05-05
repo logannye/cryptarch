@@ -18,7 +18,7 @@ def base_settings(monkeypatch) -> Settings:
         alloc_layer_2_pct=0.25,
         alloc_layer_3_pct=0.15,
         max_total_deployed_pct=0.50,
-        max_per_position_usd=500.0,
+        max_per_position_pct=0.25,
         enable_live_orders=False,
         layer_1_funding_arb_enabled=True,
         layer_2_cascade_capture_enabled=True,
@@ -181,7 +181,7 @@ def test_live_order_allowed_when_enabled(monkeypatch, base_settings):
         _env_file=None,
         bankroll_usd=2000.0, alloc_layer_1_pct=0.60, alloc_layer_2_pct=0.25,
         alloc_layer_3_pct=0.15, max_total_deployed_pct=0.50,
-        max_per_position_usd=500.0,
+        max_per_position_pct=0.25,
         enable_live_orders=True,
         layer_1_funding_arb_enabled=True,
     )
@@ -199,7 +199,7 @@ def test_disabled_layer_rejected():
         _env_file=None,
         bankroll_usd=2000.0, alloc_layer_1_pct=0.60, alloc_layer_2_pct=0.25,
         alloc_layer_3_pct=0.15, max_total_deployed_pct=0.50,
-        max_per_position_usd=500.0,
+        max_per_position_pct=0.25,
         enable_live_orders=False,
         layer_1_funding_arb_enabled=False,    # disabled
     )
