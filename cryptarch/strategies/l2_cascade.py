@@ -143,6 +143,52 @@ def cascade_probability(
 
 
 @dataclass(frozen=True)
+class LadderDesignSnapshot:
+    """The subset of settings that determine a ladder's geometry at design
+    time. Stored on each rung's metadata so the L2 executor can detect
+    when a strategy change has invalidated existing ladders and refresh
+    them — no more pre-tweak/post-tweak ladder mismatch.
+
+    Intentionally narrow: only fields that affect rung sizes or count.
+    TP/SL percentages are read live at fill/manage time and adapt naturally,
+    so they don't need to invalidate placement-stage ladders.
+    """
+    bankroll_usd: float
+    l2_ladder_pct: float
+    l2_ladder_levels: int
+
+    @classmethod
+    def from_settings(cls, settings) -> "LadderDesignSnapshot":
+        return cls(
+            bankroll_usd=settings.bankroll_usd,
+            l2_ladder_pct=settings.l2_ladder_pct,
+            l2_ladder_levels=settings.l2_ladder_levels,
+        )
+
+    @classmethod
+    def from_dict(cls, d: dict | None) -> "LadderDesignSnapshot | None":
+        """Returns None for a missing or partial dict — callers treat None
+        as 'unknown vintage' and refresh accordingly."""
+        if not d:
+            return None
+        try:
+            return cls(
+                bankroll_usd=float(d["bankroll_usd"]),
+                l2_ladder_pct=float(d["l2_ladder_pct"]),
+                l2_ladder_levels=int(d["l2_ladder_levels"]),
+            )
+        except (KeyError, ValueError, TypeError):
+            return None
+
+    def to_dict(self) -> dict[str, float | int]:
+        return {
+            "bankroll_usd": self.bankroll_usd,
+            "l2_ladder_pct": self.l2_ladder_pct,
+            "l2_ladder_levels": self.l2_ladder_levels,
+        }
+
+
+@dataclass(frozen=True)
 class LadderRung:
     pct_below: float        # e.g. 0.02 = 2% below entry-time spot
     limit_price: float      # absolute price for the limit order
