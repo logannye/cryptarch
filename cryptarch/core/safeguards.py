@@ -46,6 +46,7 @@ def check_order(
     current_total_at_risk_usd: float,
     layer_already_deployed_usd: float,
     seen_client_order_ids: set[str],
+    layer_cap_usd: float | None = None,
 ) -> None:
     """Run every safeguard on an order. Raises GuardViolation on failure;
     returns None if the order is safe to submit.
@@ -54,6 +55,11 @@ def check_order(
       - total at-risk across all open positions
       - this layer's currently-deployed notional
       - set of client_order_ids already used (idempotency)
+      - optional layer_cap_usd override: lets the caller substitute the
+        dynamic-allocator's view of a layer's cap for the static config
+        value. The executor sizes orders against dynamic allocation; if
+        the safeguard kept enforcing the static cap they could disagree
+        and rungs the executor sized within budget would get rejected.
     """
     if order.size_usd <= 0:
         raise GuardViolation("invalid_size", f"size_usd must be positive, got {order.size_usd}")
@@ -77,17 +83,19 @@ def check_order(
             f"{settings.max_total_deployed_usd:.2f} ({settings.max_total_deployed_pct*100:.0f}% of bankroll)",
         )
 
-    # 3. Layer-specific cap
-    layer_cap = {
+    # 3. Layer-specific cap. The override is authoritative when supplied;
+    # otherwise fall back to the static config value for that layer.
+    static_layer_cap = {
         "l1_funding": settings.alloc_layer_1_usd,
         "l2_cascade": settings.alloc_layer_2_usd,
         "l3_tail":    settings.alloc_layer_3_usd,
     }.get(order.layer)
-    if layer_cap is None:
+    if static_layer_cap is None:
         raise GuardViolation(
             "unknown_layer",
             f"layer must be one of l1_funding | l2_cascade | l3_tail, got {order.layer!r}",
         )
+    layer_cap = layer_cap_usd if layer_cap_usd is not None else static_layer_cap
     new_layer_deployed = layer_already_deployed_usd + order.size_usd
     if new_layer_deployed > layer_cap:
         raise GuardViolation(

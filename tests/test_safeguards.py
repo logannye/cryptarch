@@ -137,6 +137,53 @@ def test_layer_1_cap_exceeded(base_settings):
         )
 
 
+def test_layer_cap_override_relaxes_static_cap(base_settings):
+    """When the dynamic allocator gives a layer more headroom than its
+    static config (e.g. cascade signal is hot → dynamic L2 = 38% > static
+    25%), the executor passes that as an override and the guard uses it.
+    Without this, the executor and safeguard disagree and rungs that the
+    executor sized within its budget get rejected by the guard."""
+    # Static L2 alloc at $2k bankroll = $500. Without override, $1100
+    # already-deployed + $200 new would be over $500 so this fails. With
+    # override = $1500, the same order is fine.
+    check_order(
+        _ok_order(layer="l2_cascade", size_usd=200.0),
+        base_settings,
+        current_total_at_risk_usd=0.0,
+        layer_already_deployed_usd=1100.0,
+        seen_client_order_ids=set(),
+        layer_cap_usd=1500.0,
+    )    # no exception
+
+
+def test_layer_cap_override_can_tighten_static_cap(base_settings):
+    """The override is authoritative — if dynamic alloc says L2 should be
+    smaller (signal weak), the override tightens the cap below static."""
+    # Static L2 alloc = $500; without override, $300 + $100 deployed = $400 passes.
+    # With override = $350, same order should now fail.
+    with pytest.raises(GuardViolation, match="layer_cap_exceeded"):
+        check_order(
+            _ok_order(layer="l2_cascade", size_usd=300.0),
+            base_settings,
+            current_total_at_risk_usd=0.0,
+            layer_already_deployed_usd=100.0,
+            seen_client_order_ids=set(),
+            layer_cap_usd=350.0,
+        )
+
+
+def test_layer_cap_falls_back_to_static_when_no_override(base_settings):
+    """Without the new override param, behavior is unchanged."""
+    with pytest.raises(GuardViolation, match="layer_cap_exceeded"):
+        check_order(
+            _ok_order(layer="l2_cascade", size_usd=200.0),
+            base_settings,
+            current_total_at_risk_usd=0.0,
+            layer_already_deployed_usd=400.0,    # static L2 cap is $500
+            seen_client_order_ids=set(),
+        )
+
+
 def test_unknown_layer_rejected(base_settings):
     with pytest.raises(GuardViolation, match="unknown_layer"):
         check_order(

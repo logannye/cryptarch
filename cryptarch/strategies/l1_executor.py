@@ -248,12 +248,13 @@ class L1Executor:
         """Build orders for both legs, run safeguards, simulate fills,
         record in DB. Returns True if opened, False if any leg refused."""
         # Sizing: capital allocated to L1 / max position size, whichever smaller.
-        # Phase 4: prefer the dynamic allocation if the allocator has set one.
+        # Prefer dynamic allocation but never below the static floor — gives
+        # at least the static guarantee, lets dynamic expand when funding is
+        # hot. Same value is passed to check_order so the safeguards agree.
         state = await self._store.get_system_state()
-        if state and state.dynamic_alloc_l1_pct is not None:
-            alloc_pct = state.dynamic_alloc_l1_pct
-        else:
-            alloc_pct = self._settings.alloc_layer_1_pct
+        static_pct = self._settings.alloc_layer_1_pct
+        dynamic_pct = state.dynamic_alloc_l1_pct if state and state.dynamic_alloc_l1_pct is not None else None
+        alloc_pct = max(static_pct, dynamic_pct) if dynamic_pct is not None else static_pct
         layer_alloc_usd = self._settings.bankroll_usd * alloc_pct
         layer_remaining = (
             layer_alloc_usd
@@ -294,13 +295,15 @@ class L1Executor:
             total_at_risk = await self._store.total_at_risk_usd()
             layer_deployed = await self._store.layer_deployed_usd(self.LAYER)
             seen_ids = await self._store.recent_client_order_ids()
-            check_order(spot_order, self._settings, total_at_risk, layer_deployed, seen_ids)
+            check_order(spot_order, self._settings, total_at_risk, layer_deployed, seen_ids,
+                        layer_cap_usd=layer_alloc_usd)
             # Conceptually the second leg is part of the same total — pass updated counters.
             check_order(
                 perp_order, self._settings,
                 total_at_risk + spot_order.size_usd,
                 layer_deployed + spot_order.size_usd,
                 seen_ids | {spot_order.client_order_id},
+                layer_cap_usd=layer_alloc_usd,
             )
         except GuardViolation as e:
             log.info("l1_open_guard_violation",
