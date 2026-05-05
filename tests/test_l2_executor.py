@@ -164,6 +164,225 @@ def _make_store(open_positions=None, total_at_risk=0.0, layer_deployed=0.0,
     return store
 
 
+# ── ladder config snapshot + stale-refresh ──
+
+
+class TestLadderConfigSnapshot:
+    """When systemic strategy parameters (ladder size, levels, bankroll)
+    change, opening rungs from the prior config become structurally stale.
+    The bot must detect this and refresh them so all live ladders reflect
+    the current strategy."""
+
+    def test_snapshot_captures_design_relevant_settings(self):
+        from cryptarch.strategies.l2_cascade import LadderDesignSnapshot
+        s = _settings(bankroll_usd=5000.0, l2_ladder_pct=0.12, l2_ladder_levels=4)
+        snap = LadderDesignSnapshot.from_settings(s)
+        assert snap.bankroll_usd == 5000.0
+        assert snap.l2_ladder_pct == 0.12
+        assert snap.l2_ladder_levels == 4
+
+    def test_snapshot_round_trips_through_dict(self):
+        from cryptarch.strategies.l2_cascade import LadderDesignSnapshot
+        original = LadderDesignSnapshot(
+            bankroll_usd=5000.0, l2_ladder_pct=0.12, l2_ladder_levels=4,
+        )
+        roundtripped = LadderDesignSnapshot.from_dict(original.to_dict())
+        assert roundtripped == original
+
+    def test_snapshot_from_missing_dict_is_none(self):
+        from cryptarch.strategies.l2_cascade import LadderDesignSnapshot
+        assert LadderDesignSnapshot.from_dict(None) is None
+        assert LadderDesignSnapshot.from_dict({}) is None
+
+    def test_snapshot_from_partial_dict_is_none(self):
+        """Legacy positions saved before this feature have no snapshot —
+        from_dict returns None to signal 'unknown vintage' so the refresh
+        loop treats them as stale."""
+        from cryptarch.strategies.l2_cascade import LadderDesignSnapshot
+        assert LadderDesignSnapshot.from_dict({"l2_ladder_pct": 0.20}) is None
+
+
+@pytest.mark.asyncio
+async def test_placed_ladder_records_config_snapshot_in_metadata():
+    """Each rung must carry the design-time config so we can detect later
+    if it has gone stale relative to the live config."""
+    settings = _settings(bankroll_usd=5000.0, l2_ladder_pct=0.12)
+    pool, _ = _make_pool(spot_price=100.0)
+    store = _make_store()
+    create_calls: list[dict] = []
+    async def capture_create(**kw):
+        create_calls.append(kw)
+        return 100 + kw.get("notional_usd", 0)
+    store.create_position = AsyncMock(side_effect=capture_create)
+
+    async def signal_high(symbol, executor):
+        return 0.7
+    executor = L2Executor(
+        settings, store, pool,
+        symbols=[SymbolConfig("binance", "BTC/USDT", "BTC")],
+        signal_fn=signal_high,
+    )
+    await executor.run_once()
+    assert create_calls, "expected at least one rung placed"
+    for call in create_calls:
+        snap = call["metadata"].get("config_snapshot")
+        assert snap is not None
+        assert snap["bankroll_usd"] == 5000.0
+        assert snap["l2_ladder_pct"] == 0.12
+        assert snap["l2_ladder_levels"] == 4
+
+
+@pytest.mark.asyncio
+async def test_opening_rung_with_stale_snapshot_is_refreshed():
+    """A rung designed under l2_ladder_pct=0.20 but running against current
+    l2_ladder_pct=0.12 should be cancelled at $0 P&L. Next cycle the
+    executor will re-evaluate the symbol and design a fresh ladder."""
+    settings = _settings(bankroll_usd=5000.0, l2_ladder_pct=0.12)
+    pool, _ = _make_pool(spot_price=100.0)
+    stale_pos = OpenPosition(
+        id=42, layer="l2_cascade", strategy_group_id="g1", state="opening",
+        notional_usd=100.0, realized_pnl_usd=0.0, opened_at=datetime.now(timezone.utc),
+        metadata={
+            "symbol_key": "binance:BTC/USDT",
+            "symbol": "BTC/USDT",
+            "limit_price": 99.0,
+            "size_usd": 100.0,
+            "spot_at_design": 100.0,
+            "config_snapshot": {
+                "bankroll_usd": 5000.0,
+                "l2_ladder_pct": 0.20,    # ← stale (current is 0.12)
+                "l2_ladder_levels": 4,
+            },
+        },
+    )
+    store = _make_store(open_positions=[stale_pos])
+    async def signal_low(symbol, executor):
+        return 0.3    # below trigger so no new placement
+    executor = L2Executor(
+        settings, store, pool,
+        symbols=[SymbolConfig("binance", "BTC/USDT", "BTC")],
+        signal_fn=signal_low,
+    )
+    await executor.run_once()
+    store.close_position.assert_awaited_with(42, realized_pnl=0.0)
+
+
+@pytest.mark.asyncio
+async def test_opening_rung_with_missing_snapshot_is_refreshed():
+    """Legacy positions placed before the snapshot feature existed have
+    no config_snapshot in metadata — they should be treated as stale and
+    refreshed on the next cycle."""
+    settings = _settings(bankroll_usd=5000.0, l2_ladder_pct=0.12)
+    pool, _ = _make_pool(spot_price=100.0)
+    legacy_pos = OpenPosition(
+        id=99, layer="l2_cascade", strategy_group_id="legacy", state="opening",
+        notional_usd=100.0, realized_pnl_usd=0.0, opened_at=datetime.now(timezone.utc),
+        metadata={
+            "symbol_key": "binance:BTC/USDT",
+            "symbol": "BTC/USDT",
+            "limit_price": 99.0,
+            "size_usd": 100.0,
+            "spot_at_design": 100.0,
+            # no config_snapshot key at all
+        },
+    )
+    store = _make_store(open_positions=[legacy_pos])
+    async def signal_low(symbol, executor):
+        return 0.3
+    executor = L2Executor(
+        settings, store, pool,
+        symbols=[SymbolConfig("binance", "BTC/USDT", "BTC")],
+        signal_fn=signal_low,
+    )
+    await executor.run_once()
+    store.close_position.assert_awaited_with(99, realized_pnl=0.0)
+
+
+@pytest.mark.asyncio
+async def test_opening_rung_with_matching_snapshot_is_not_refreshed():
+    """Rungs whose snapshot matches current config must be left alone — no
+    cancellation should fire just because we ran the refresh check."""
+    settings = _settings(bankroll_usd=5000.0, l2_ladder_pct=0.12)
+    pool, _ = _make_pool(spot_price=100.0)
+    fresh_pos = OpenPosition(
+        id=7, layer="l2_cascade", strategy_group_id="g1", state="opening",
+        notional_usd=100.0, realized_pnl_usd=0.0, opened_at=datetime.now(timezone.utc),
+        metadata={
+            "symbol_key": "binance:BTC/USDT",
+            "symbol": "BTC/USDT",
+            "limit_price": 99.0,
+            "size_usd": 100.0,
+            "spot_at_design": 100.0,
+            "rung_idx": 0,
+            "rung_pct_below": 0.01,
+            "config_snapshot": {
+                "bankroll_usd": 5000.0,
+                "l2_ladder_pct": 0.12,
+                "l2_ladder_levels": 4,
+            },
+        },
+    )
+    # signal at 0.5 — above hold threshold so won't be cancelled for that
+    # reason either, leaving only "stale config" as a possible reason.
+    store = _make_store(open_positions=[fresh_pos])
+    async def signal_mid(symbol, executor):
+        return 0.5
+    executor = L2Executor(
+        settings, store, pool,
+        symbols=[SymbolConfig("binance", "BTC/USDT", "BTC")],
+        signal_fn=signal_mid,
+    )
+    await executor.run_once()
+    store.close_position.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_filled_rung_is_not_refreshed_even_if_snapshot_stale():
+    """Once a rung is filled (state='open'), its size is established —
+    we can't re-deploy capital that's already in a position. The refresh
+    is for opening (pending) rungs only."""
+    settings = _settings(bankroll_usd=5000.0, l2_ladder_pct=0.12)
+    pool, _ = _make_pool(spot_price=100.0)
+    filled_pos = OpenPosition(
+        id=11, layer="l2_cascade", strategy_group_id="g1", state="open",
+        notional_usd=100.0, realized_pnl_usd=0.0, opened_at=datetime.now(timezone.utc),
+        metadata={
+            "symbol_key": "binance:BTC/USDT",
+            "symbol": "BTC/USDT",
+            "fill_price": 99.0,
+            "tp_price": 100.18,
+            "sl_price": 96.03,
+            "size_usd": 100.0,
+            "filled_at": datetime.now(timezone.utc).isoformat(),
+            "config_snapshot": {
+                "bankroll_usd": 2000.0,    # stale — bankroll has since changed
+                "l2_ladder_pct": 0.20,
+                "l2_ladder_levels": 4,
+            },
+        },
+    )
+    store = _make_store(open_positions=[filled_pos])
+    async def signal_low(symbol, executor):
+        return 0.3
+    executor = L2Executor(
+        settings, store, pool,
+        symbols=[SymbolConfig("binance", "BTC/USDT", "BTC")],
+        signal_fn=signal_low,
+    )
+    await executor.run_once()
+    # close_position may be called for OTHER reasons (TP/SL/timestop) inside
+    # _manage_filled_position, but NOT with realized_pnl=0.0 from the refresh.
+    # The refresh path is the only one that closes opening positions at $0.
+    refresh_calls = [
+        c for c in store.close_position.await_args_list
+        if c.kwargs.get("realized_pnl") == 0.0 or (c.args and c.args[1] == 0.0)
+    ]
+    # Refresh would close at $0; filled positions must not be among those.
+    assert all(
+        not (c.args and c.args[0] == 11) for c in refresh_calls
+    ), f"filled position 11 was refresh-closed: {refresh_calls}"
+
+
 # ── trigger logic ──
 
 
@@ -299,6 +518,13 @@ async def test_pending_rung_cancels_when_signal_weakens():
             "exchange": "binance", "symbol": "BTC/USDT",
             "limit_price": 49000, "size_usd": 50, "rung_idx": 1,
             "spot_at_design": 50000,
+            # Current snapshot so the refresh path leaves this position
+            # alone and the signal-weakening cancellation can fire.
+            "config_snapshot": {
+                "bankroll_usd": settings.bankroll_usd,
+                "l2_ladder_pct": settings.l2_ladder_pct,
+                "l2_ladder_levels": settings.l2_ladder_levels,
+            },
         },
     )
     store = _make_store(open_positions=[pending])

@@ -46,7 +46,7 @@ from cryptarch.db.store import OpenPosition, Store
 from cryptarch.exchanges.pool import ExchangePool
 from cryptarch.sim.realistic import simulate_limit_maker, simulate_market_buy, simulate_market_sell
 from cryptarch.strategies.l2_cascade import (
-    Ladder, cascade_probability, design_ladder,
+    Ladder, LadderDesignSnapshot, cascade_probability, design_ladder,
     should_refresh_ladder, stop_loss_price, take_profit_price,
 )
 
@@ -168,6 +168,17 @@ class L2Executor:
         # Read all open L2 positions.
         open_positions = await self._store.open_positions(layer=self.LAYER)
 
+        # 0. Refresh stale ladders. Any opening rung whose design-time
+        # config snapshot doesn't match current settings (or is missing
+        # entirely from a legacy placement) gets cancelled at $0 P&L.
+        # Next pass through the cascade scan will re-evaluate the symbol
+        # and design a fresh ladder if conditions still warrant. This is
+        # the structural guarantee that all live ladders reflect the
+        # current strategy — no pre-tweak/post-tweak split.
+        n_refreshed = await self._refresh_stale_ladders(open_positions)
+        if n_refreshed > 0:
+            open_positions = await self._store.open_positions(layer=self.LAYER)
+
         n_filled = 0
         n_closed = 0
         n_new_ladders = 0
@@ -201,7 +212,42 @@ class L2Executor:
             "rungs_filled": n_filled,
             "positions_closed": n_closed,
             "new_ladders": n_new_ladders,
+            "stale_refreshed": n_refreshed,
         }
+
+    # ── refresh stale ladders ──
+
+    async def _refresh_stale_ladders(self, open_positions: list[OpenPosition]) -> int:
+        """Cancel any opening rung whose design-time config snapshot no
+        longer matches the current settings (or whose snapshot is missing
+        — legacy positions from before this feature). The rungs close at
+        $0 P&L (they were never filled, no realized loss); next cycle the
+        executor will re-evaluate the symbol against the live config and
+        place a fresh ladder if score >= trigger.
+
+        Filled rungs (state='open') are intentionally left alone — their
+        size is already deployed and can't be retroactively redesigned.
+        TP/SL adapt naturally because they're computed at fill time from
+        live settings, not from the snapshot.
+
+        Returns the count of rungs refresh-closed.
+        """
+        current = LadderDesignSnapshot.from_settings(self._settings)
+        n_refreshed = 0
+        for pos in open_positions:
+            if pos.state != "opening":
+                continue
+            stored = LadderDesignSnapshot.from_dict(pos.metadata.get("config_snapshot"))
+            if stored == current:
+                continue
+            await self._store.close_position(pos.id, realized_pnl=0.0)
+            log.info("l2_rung_refreshed_stale_config",
+                     position=pos.id,
+                     symbol=pos.metadata.get("symbol_key"),
+                     stored_snapshot=pos.metadata.get("config_snapshot"),
+                     current_snapshot=current.to_dict())
+            n_refreshed += 1
+        return n_refreshed
 
     # ── place ladder ──
 
@@ -291,6 +337,9 @@ class L2Executor:
                     "trigger_score": score,
                     "client_order_id": client_order_id,
                     "phase": "pending_rung",
+                    "config_snapshot": LadderDesignSnapshot.from_settings(
+                        self._settings,
+                    ).to_dict(),
                 },
             )
 
