@@ -32,14 +32,19 @@ class Settings(BaseSettings):
     layer_3_tail_hedge_enabled: bool = False
 
     # ── Bankroll + allocation ──
+    # The bankroll is the ONLY canonical $ knob. Every other dollar
+    # amount in the system is derived from bankroll × pct, so a $50k
+    # bankroll automatically moves 10× the notional of a $5k one with
+    # no code changes. Do not introduce hardcoded $ values elsewhere.
     bankroll_usd: float = 2000.0
     alloc_layer_1_pct: float = 0.60
     alloc_layer_2_pct: float = 0.25
     alloc_layer_3_pct: float = 0.15
 
-    # ── Hard caps ──
+    # ── Hard caps (% of bankroll) ──
     max_total_deployed_pct: float = 0.50
-    max_per_position_usd: float = 500.0
+    max_per_position_pct: float = 0.25      # max single-position notional
+    min_position_pct: float = 0.01          # min trade size; below this, fees dominate
 
     # ── Layer 1 ──
     l1_min_funding_rate_8h: float = 0.0003
@@ -48,12 +53,17 @@ class Settings(BaseSettings):
 
     # ── Layer 2 ──
     l2_ladder_levels: int = 4
-    l2_ladder_total_usd: float = 200.0
+    # Per-ladder notional as % of bankroll. 0.20 = 20% of $2k = $400 at
+    # default. Concentrated on PEPE/WIF where the 90-day backtest showed
+    # actual edge. Per-rung max stays under max_per_position_pct.
+    l2_ladder_pct: float = 0.20
     l2_take_profit_pct: float = 0.012
     l2_stop_loss_pct: float = 0.030
 
     # ── Layer 3 ──
-    l3_daily_theta_budget_usd: float = 10.0
+    # Daily theta cost as % of bankroll. 0.005 = 0.5%/day = max $10/day
+    # at $2k. Drives strangle contract sizing through theta-budget math.
+    l3_daily_theta_budget_pct: float = 0.005
     l3_target_days_to_expiry: int = 45
     l3_otm_pct: float = 0.20
 
@@ -80,6 +90,22 @@ class Settings(BaseSettings):
     @property
     def max_total_deployed_usd(self) -> float:
         return self.bankroll_usd * self.max_total_deployed_pct
+
+    @property
+    def max_per_position_usd(self) -> float:
+        return self.bankroll_usd * self.max_per_position_pct
+
+    @property
+    def min_position_usd(self) -> float:
+        return self.bankroll_usd * self.min_position_pct
+
+    @property
+    def l2_ladder_total_usd(self) -> float:
+        return self.bankroll_usd * self.l2_ladder_pct
+
+    @property
+    def l3_daily_theta_budget_usd(self) -> float:
+        return self.bankroll_usd * self.l3_daily_theta_budget_pct
 
     model_config = {
         "env_file": ".env",

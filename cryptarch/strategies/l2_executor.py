@@ -57,18 +57,24 @@ log = structlog.get_logger()
 # - No funding cost / liquidation risk on a long position
 # - Cleaner simulation
 # - Clean separation from L1 (which uses spot+perp combined)
-DEFAULT_SYMBOLS: list[tuple[str, str, str]] = [
-    # (exchange, symbol, base_label)
-    ("binance", "BTC/USDT",   "BTC"),
-    ("binance", "ETH/USDT",   "ETH"),
-    ("binance", "SOL/USDT",   "SOL"),
-    ("binance", "XRP/USDT",   "XRP"),
-    ("binance", "DOGE/USDT",  "DOGE"),
-    ("binance", "PEPE/USDT",  "PEPE"),
-    ("binance", "SHIB/USDT",  "SHIB"),
-    ("binance", "FLOKI/USDT", "FLOKI"),
-    ("binance", "WIF/USDT",   "WIF"),
-    ("binance", "BONK/USDT",  "BONK"),
+#
+# Concentrated universe: BTC/ETH/SOL as low-cost majors plus PEPE/WIF as
+# the high-vol memes that actually mean-revert on hour-scale dips. A
+# 90-day backtest showed XRP/DOGE/SHIB/FLOKI/BONK were neutral-to-
+# negative on cascade-capture P&L (FLOKI alone lost ~$9 of a +$80 gross),
+# while PEPE+WIF alone produced ~$84 — i.e. the universe was diluting
+# the actual edge. The other memes can return to the list once their
+# distribution-phase trends end.
+#
+# Tuple form: (exchange, spot_symbol, base_label[, perp_symbol_override]).
+# The perp override is required for memecoins where Binance lists the
+# perp under a 1000-multiple base — PEPE/USDT spot ↔ 1000PEPE/USDT:USDT.
+DEFAULT_SYMBOLS: list[tuple[str, str, str] | tuple[str, str, str, str]] = [
+    ("binance", "BTC/USDT",  "BTC"),
+    ("binance", "ETH/USDT",  "ETH"),
+    ("binance", "SOL/USDT",  "SOL"),
+    ("binance", "PEPE/USDT", "PEPE", "1000PEPE/USDT:USDT"),
+    ("binance", "WIF/USDT",  "WIF"),
 ]
 
 
@@ -77,10 +83,20 @@ class SymbolConfig:
     exchange: str
     symbol: str
     base_label: str
+    # Explicit override for the perp-market symbol. None means derive
+    # it as `<spot>:USDT` (works for everything except 1000-multiple
+    # memecoin perps).
+    perp_symbol_override: str | None = None
 
     @property
     def key(self) -> str:
         return f"{self.exchange}:{self.symbol}"
+
+    @property
+    def perp_symbol(self) -> str:
+        if self.perp_symbol_override is not None:
+            return self.perp_symbol_override
+        return self.symbol.replace("/USDT", "/USDT:USDT")
 
 
 # Per-symbol signal callback. Takes a SymbolConfig + the L2 executor's
@@ -97,7 +113,7 @@ async def default_cascade_signal(symbol: SymbolConfig, executor: "L2Executor") -
     A future Phase 2c will introduce a rolling OI observer that records
     open_interest over time and computes the proper percentile signal.
     """
-    perp_symbol = symbol.symbol.replace("/USDT", "/USDT:USDT")
+    perp_symbol = symbol.perp_symbol
     try:
         client = await executor._pool.get(symbol.exchange, market_type="swap")
         funding = await client.get_funding_rate(perp_symbol)
@@ -217,7 +233,7 @@ class L2Executor:
             - await self._store.layer_deployed_usd(self.LAYER)
         )
         budget = min(layer_remaining, self._settings.l2_ladder_total_usd)
-        if budget < 20.0:
+        if budget < self._settings.min_position_usd:
             return False
 
         ladder = design_ladder(

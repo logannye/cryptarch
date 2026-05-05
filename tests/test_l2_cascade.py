@@ -40,8 +40,10 @@ class TestCascadeProbability:
             oi_percentile=95.0, funding_rate_24h_avg=0,
             recent_24h_vol_pct=0.05, historical_7d_vol_pct=0.05,
         )
-        # OI alone gives 0.4 weight × 1.0 = 0.4
-        assert score == pytest.approx(0.4, abs=0.05)
+        # OI alone with weight 0.55 × 1.0 = 0.55. OI is the actual cascade
+        # fuel — leverage piling up is what fills the order-book trough
+        # when liquidations cascade. Funding and compression are confirmations.
+        assert score == pytest.approx(0.55, abs=0.05)
 
     def test_funding_signal_dominates_at_high_funding(self):
         score = cascade_probability(
@@ -50,8 +52,8 @@ class TestCascadeProbability:
             recent_24h_vol_pct=0.05,
             historical_7d_vol_pct=0.05,
         )
-        # Funding alone gives 0.4 × 1.0 = 0.4
-        assert score == pytest.approx(0.4, abs=0.05)
+        # Funding alone with weight 0.20 × 1.0 = 0.20.
+        assert score == pytest.approx(0.20, abs=0.05)
 
     def test_compression_alone_is_modest(self):
         # No leverage signals, but vol compressed 50%.
@@ -61,8 +63,43 @@ class TestCascadeProbability:
             recent_24h_vol_pct=0.025,
             historical_7d_vol_pct=0.05,
         )
-        # Compression: ratio 0.5 → (1-0.5)/0.7 = 0.714; weighted 0.2 = 0.143
-        assert score == pytest.approx(0.143, abs=0.02)
+        # Compression: ratio 0.5 → (1-0.5)/0.7 = 0.714; weighted 0.25 ≈ 0.179
+        assert score == pytest.approx(0.179, abs=0.02)
+
+    def test_btc_like_setup_passes_trigger(self):
+        """A BTC-style setup (max OI percentile, neutral-to-mildly-negative
+        funding, ~30% vol compression) should clear the 0.6 trigger.
+        Reflects an observed live regime where rigid weights blocked a
+        clearly cascade-primed setup because funding wasn't retail-bullish."""
+        score = cascade_probability(
+            oi_percentile=95.8,
+            funding_rate_24h_avg=0.0,    # funding signal=0
+            recent_24h_vol_pct=0.033,
+            historical_7d_vol_pct=0.05,    # ratio 0.66 → compression~0.49
+        )
+        assert score >= 0.6
+
+    def test_doge_like_setup_passes_trigger(self):
+        """A DOGE-style setup (high OI, mild positive funding, deep vol
+        compression) should clear the 0.6 trigger."""
+        score = cascade_probability(
+            oi_percentile=88.5,
+            funding_rate_24h_avg=0.000043,    # 0.043 funding signal
+            recent_24h_vol_pct=0.0188,
+            historical_7d_vol_pct=0.05,    # ratio 0.376 → compression~0.89
+        )
+        assert score >= 0.6
+
+    def test_pure_compression_does_not_trigger_alone(self):
+        """Vol compression by itself, with no leverage buildup, must not
+        be enough to fire — it's a confirmation signal, not the prime mover."""
+        score = cascade_probability(
+            oi_percentile=50.0,
+            funding_rate_24h_avg=0.0,
+            recent_24h_vol_pct=0.005,
+            historical_7d_vol_pct=0.05,
+        )
+        assert score < 0.6
 
     def test_zero_historical_vol_handled_safely(self):
         # Edge: division by zero

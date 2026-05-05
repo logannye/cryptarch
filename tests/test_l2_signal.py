@@ -186,6 +186,37 @@ async def test_observer_handles_fetch_failure_gracefully():
 
 
 @pytest.mark.asyncio
+async def test_observer_uses_configured_perp_symbol_for_memecoin():
+    """Regression: PEPE/SHIB/FLOKI/BONK perps live under a 1000-prefix
+    on Binance. The OI observer must request the configured perp symbol,
+    not naively append `:USDT` to the spot."""
+    store = _store_with_oi_history([])
+    pool, _, perp = _make_pool_for_signal(1.5e9, 0.0, _candles_flat())
+    symbols = [
+        SymbolConfig("binance", "PEPE/USDT", "PEPE",
+                     perp_symbol_override="1000PEPE/USDT:USDT"),
+    ]
+    observer = OIObserver(store, pool, symbols)
+    await observer.run_once()
+    perp.get_open_interest.assert_awaited_once_with("1000PEPE/USDT:USDT")
+
+
+@pytest.mark.asyncio
+async def test_cascade_signal_uses_configured_perp_symbol_for_memecoin():
+    """Regression: CascadeSignal must use the configured perp symbol
+    when fetching OI and funding for memecoin pairs."""
+    history = [1.0e9] * 30    # enough to clear MIN_OI_HISTORY_LEN
+    store = _store_with_oi_history(history)
+    pool, _, perp = _make_pool_for_signal(1.5e9, 0.0005, _candles_flat())
+    signal = CascadeSignal(store, pool)
+    sym = SymbolConfig("binance", "PEPE/USDT", "PEPE",
+                       perp_symbol_override="1000PEPE/USDT:USDT")
+    await signal(sym, executor=None)
+    perp.get_open_interest.assert_awaited_once_with("1000PEPE/USDT:USDT")
+    perp.get_funding_rate.assert_awaited_once_with("1000PEPE/USDT:USDT")
+
+
+@pytest.mark.asyncio
 async def test_observer_prunes_periodically():
     store = _store_with_oi_history([])
     pool, _, _ = _make_pool_for_signal(1.5e9, 0.0, _candles_flat())

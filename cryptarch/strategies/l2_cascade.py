@@ -128,8 +128,15 @@ def cascade_probability(
     else:
         compression_signal = 0.0
 
-    # Weighted composite: leverage buildup is the dominant signal.
-    return 0.4 * oi_signal + 0.4 * funding_signal + 0.2 * compression_signal
+    # Weighted composite. Re-tuned after observing live regimes where
+    # cascade-primed setups (max OI percentile + meaningful vol compression)
+    # were blocked because funding wasn't retail-bullish. OI is the actual
+    # cascade fuel — leverage piling up is what makes the order-book trough
+    # deep enough for the price overshoot. Funding and compression are
+    # confirmations: positive funding tells us crowded longs (the side that
+    # liquidates in our buy-the-dip ladder), and compression says energy is
+    # building, but neither produces the cascade by itself.
+    return 0.55 * oi_signal + 0.20 * funding_signal + 0.25 * compression_signal
 
 
 # ── Ladder design ──────────────────────────────────────────────────
