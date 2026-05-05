@@ -162,7 +162,7 @@ scripts/
 └── backtest_l2_tail_rungs.py  # 90-day backtest of ladder design variants
 ```
 
-## Lessons applied from polybot + sportsarb
+## Lessons applied from previous trading bot designs
 
 1. **Realistic dry-run from day one.** The `sim/realistic.py` module rejects "fills" when no real counter-party is at our price. Polybot's pre-v12.5 sim produced $686 of fictional P&L by pretending unfillable orders filled.
 2. **Per-cycle hard timeout** so a stuck exchange doesn't deadlock the engine.
