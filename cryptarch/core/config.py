@@ -38,7 +38,12 @@ class Settings(BaseSettings):
     # no code changes. Do not introduce hardcoded $ values elsewhere.
     bankroll_usd: float = 2000.0
     alloc_layer_1_pct: float = 0.60
-    alloc_layer_2_pct: float = 0.25
+    # L2 cap raised from 0.25 → 0.40 after live observation showed the
+    # 25% cap rejecting deepest rungs once 1+ ladder was active. The
+    # static value is now a conservative floor; the dynamic allocator
+    # can push higher under strong cascade signal (and the safeguards
+    # accept either via layer_cap_usd override).
+    alloc_layer_2_pct: float = 0.40
     alloc_layer_3_pct: float = 0.15
 
     # ── Hard caps (% of bankroll) ──
@@ -53,10 +58,11 @@ class Settings(BaseSettings):
 
     # ── Layer 2 ──
     l2_ladder_levels: int = 4
-    # Per-ladder notional as % of bankroll. 0.20 = 20% of $2k = $400 at
-    # default. Concentrated on PEPE/WIF where the 90-day backtest showed
-    # actual edge. Per-rung max stays under max_per_position_pct.
-    l2_ladder_pct: float = 0.20
+    # Per-ladder notional as % of bankroll. 0.12 = 12% of bankroll.
+    # Sized so 3+ concurrent ladders can fit within the L2 alloc cap;
+    # was 0.20 but at $5k+ bankroll that left only ~1.6 ladders of room
+    # before the deepest rungs got rejected by the layer cap.
+    l2_ladder_pct: float = 0.12
     l2_take_profit_pct: float = 0.012
     l2_stop_loss_pct: float = 0.030
 

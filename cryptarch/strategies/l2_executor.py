@@ -220,13 +220,13 @@ class L2Executor:
         if spot <= 0:
             return False
 
-        # Sizing budget: allocation - already-deployed.
-        # Phase 4: prefer dynamic allocation if set by AllocatorExecutor.
+        # Sizing budget: allocation - already-deployed. Prefer dynamic
+        # allocation but never below the static floor — gives at least
+        # the static guarantee, lets dynamic expand when signal is hot.
         state = await self._store.get_system_state()
-        if state and state.dynamic_alloc_l2_pct is not None:
-            alloc_pct = state.dynamic_alloc_l2_pct
-        else:
-            alloc_pct = self._settings.alloc_layer_2_pct
+        static_pct = self._settings.alloc_layer_2_pct
+        dynamic_pct = state.dynamic_alloc_l2_pct if state and state.dynamic_alloc_l2_pct is not None else None
+        alloc_pct = max(static_pct, dynamic_pct) if dynamic_pct is not None else static_pct
         layer_alloc_usd = self._settings.bankroll_usd * alloc_pct
         layer_remaining = (
             layer_alloc_usd
@@ -266,6 +266,7 @@ class L2Executor:
                     total_at_risk + sum(r.size_usd for r in ladder.rungs[:i]),
                     layer_deployed + sum(r.size_usd for r in ladder.rungs[:i]),
                     seen_ids,
+                    layer_cap_usd=layer_alloc_usd,
                 )
             except GuardViolation as e:
                 log.info("l2_rung_guard_violation",

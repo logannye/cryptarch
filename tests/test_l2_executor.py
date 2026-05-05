@@ -41,15 +41,24 @@ class TestSizingScalesWithBankroll:
     A $50k bankroll moves 10× the notional of a $5k one, with zero code
     changes. Hardcoded $ values are an anti-pattern."""
 
-    def test_l2_ladder_default_pct_is_20pct(self):
+    def test_l2_ladder_default_pct_is_12pct(self):
+        """Smaller ladders (was 0.20) so multiple concurrent ladders fit
+        without the deepest rungs hitting layer-cap rejection."""
         from cryptarch.core.config import Settings
-        assert Settings(_env_file=None).l2_ladder_pct == 0.20
+        assert Settings(_env_file=None).l2_ladder_pct == 0.12
 
     def test_l2_ladder_total_scales_with_bankroll(self):
         from cryptarch.core.config import Settings
-        assert Settings(_env_file=None, bankroll_usd=2_000.0).l2_ladder_total_usd == 400.0
-        assert Settings(_env_file=None, bankroll_usd=5_000.0).l2_ladder_total_usd == 1_000.0
-        assert Settings(_env_file=None, bankroll_usd=50_000.0).l2_ladder_total_usd == 10_000.0
+        assert Settings(_env_file=None, bankroll_usd=2_000.0).l2_ladder_total_usd == 240.0
+        assert Settings(_env_file=None, bankroll_usd=5_000.0).l2_ladder_total_usd == 600.0
+        assert Settings(_env_file=None, bankroll_usd=50_000.0).l2_ladder_total_usd == 6_000.0
+
+    def test_alloc_layer_2_default_is_40pct(self):
+        """L2 cap raised from 25% to 40% of bankroll. Lets multiple
+        full ladders fit at the same time on a $5k+ bankroll instead
+        of saturating after the first."""
+        from cryptarch.core.config import Settings
+        assert Settings(_env_file=None).alloc_layer_2_pct == 0.40
 
     def test_max_per_position_scales_with_bankroll(self):
         from cryptarch.core.config import Settings
